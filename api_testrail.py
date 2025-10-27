@@ -6,7 +6,7 @@
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import numpy as np
@@ -20,6 +20,7 @@ from database import (
     ReportTestCaseCoverage,
     ReportTestRailMilestones,
     ReportTestRailUsers,
+    ReportTestRailTestHealth,
     # ReportTestRunCounts
 )
 
@@ -93,6 +94,22 @@ class TestRail:
 
     def test_results_for_run(self, run_id):
         return self.client.send_get('get_results_for_run/{0}'.format(run_id))
+
+    def test_plans(self, project_id, **kwargs):
+        """Get plans that match search criteria"""
+        query = ""
+        if kwargs:
+            for key, val in kwargs.items():
+                query = query + f"&{key}={val}"
+        return self.client.send_get(f"get_plans/{project_id}{query}")
+
+    def test_plan(self, plan_id):
+        """Get a single plan by id"""
+        return self.client.send_get(f"get_plan/{plan_id}")
+
+    def get_test(self, test_id):
+        """Get single test execution by id"""
+        return self.client.send_get(f"get_test/{test_id}")
 
     # API: Users
     def users(self, testrail_project_id):
@@ -318,6 +335,103 @@ class TestRailClient(TestRail):
         df = pd.DataFrame(user_data)
         self.db.report_testrail_users_insert(df)
 
+    def update_testrail_test_health_row(self, payload):
+        new_row = {
+            "case_id": None,
+            "project_id": None,
+            "case_name": None,
+            "suite_name": None,
+            "num_executions": None,
+            "avg_runtime": None,
+            "pass_rate": None,
+            "most_recent_timestamp": None,
+            "most_recent_runtime": None,
+            "most_recent_status": None,
+            "status_history_1": None,
+            "status_history_2": None,
+            "status_history_3": None,
+            "status_history_4": None,
+        }
+
+        def increment_average(starting_count, starting_average, new_value) -> float:
+            return (
+                float(starting_average) * (float(starting_count) / float(starting_count + 1))
+            ) + (float(new_value) * (1.0 / float(starting_count + 1)))
+
+        stmt = self.db.session.select(ReportTestRailTestHealth).where(ReportTestRailTestHealth.case_id == payload.get("case_id"))
+        rows = self.db.session.execute(stmt).all()
+        new_row["case_id"] = payload.get("case_id")
+        new_row["project_id"] = payload.get("project_id")
+        new_row["case_name"] = payload.get("case_name")
+        new_row["suite_name"] = payload.get("suite_name")
+
+        if len(rows) == 0:
+            # new test
+            new_row["num_executions"] = 1
+            new_row["avg_runtime"] = payload.get("elapsed")
+            new_row["pass_rate"] = float(payload.get("status"))
+            new_row["most_recent_timestamp"] = payload.get("created_on")
+            new_row["most_recent_runtime"] = payload.get("elapsed")
+            new_row["most_recent_status"] = payload.get("status")
+        elif len(rows) == 1:
+            row = rows[0]
+            starting_count = row.num_executions
+            new_row["num_executions"] = starting_count + 1
+            new_row["avg_runtime"] = increment_average(starting_count, row.avg_runtime, payload.get("elapsed"))
+            new_row["pass_rate"] = increment_average(starting_count, row.pass_rate, payload.get("status"))
+            new_row["status_history_4"] = row.status_history_3
+            new_row["status_history_3"] = row.status_history_2
+            new_row["status_history_2"] = row.status_history_1
+            if float(payload.get("created_on")) > dt.convert_datetime_to_epoch(row.most_recent_timestamp):
+                new_row["most_recent_timestamp"] = dt.convert_epoch_to_datetime(payload["created_on"])
+                new_row["most_recent_runtime"] = payload["elapsed"]
+                new_row["status_history_1"] = row.most_recent_status
+                new_row["most_recent_status"] = payload["status"]
+            else:
+                new_row["status_history_1"] = payload["status"]
+        else:
+            # cannot have more than one matching test case--this should be examined
+            raise ValueError("Cannot have more than one matching row per primary key")
+        return new_row
+
+    def testrail_test_health(self, project, num_days):
+        AUTOUSERS = {17: 976}
+        updates = []
+        example_update = {
+            "case_id": 1,
+            "case_name": "name",
+            "suite_name": "name",
+            "created_on": "timestamp",
+            "elapsed": "4s",
+            "status": 1
+        }
+        project_ids_list = self.testrail_project_ids(project)
+        start_date = datetime.now() - timedelta(days=num_days)
+        for project_id in project_ids_list:
+            plans = self.test_plans(project_id, created_by=AUTOUSERS.get(project_id), created_after=start_date.timestamp())
+            for plan in plans:
+                plan_details = self.test_plan(plan.get("id"))
+                for entry in plan_details.get("entries"):
+                    for run in entry.get("runs"):
+                        for result in self.test_results_for_run(run.get("id")).get("results"):
+                            if not result.get("elapsed"):
+                                continue
+                            test = self.get_test(result.get("test_id"))
+                            suite_name = self.test_suite(test.get("suite_id")).get("name")
+                            update_payload = {
+                                "case_id": test.get("case_id"),
+                                "project_id": project_id,
+                                "case_name": test.get("title"),
+                                "suite_name": suite_name,
+                                "created_on": test.get("created_on"),
+                                "elapsed": self.dur_to_sec(result.get("elapsed")),
+                                "status": result.get("status")
+                            }
+                            updates.append(self.update_testrail_test_health_row(update_payload))
+
+        df = pd.DataFrame(updates)
+        self.db.report_test_health_update(df)
+
 
 class DatabaseTestRail(Database):
 
@@ -482,3 +596,9 @@ class DatabaseTestRail(Database):
                 '''
                 # self.session.add(report)
                 self.session.commit()
+
+    def report_test_health_update(self, payload):
+        for _, row in payload.iterrows():
+            report = ReportTestRailTestHealth(**row)
+            self.session.add(report)
+            self.session.commit()

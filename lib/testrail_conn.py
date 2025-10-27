@@ -27,7 +27,7 @@ class APIClient:
             base_url += '/'
         self.__url = base_url + 'index.php?/api/v2/'
         print(self.__url)
-    
+
     def send_get(self, uri, data_type=None, filepath=None):
         """Issue a GET request (read) against the API.
 
@@ -41,7 +41,7 @@ class APIClient:
         """
 
         return self.__send_request('GET', uri, data_type, filepath)
-    
+
 
     def send_post(self, uri, data):
         """Issue a POST request (write) against the API.
@@ -118,7 +118,7 @@ class APIClient:
             else:
                 try:
                     return response.json()
-                except requests.exceptions.HTTPError: 
+                except requests.exceptions.HTTPError:
                     return {}
 
 

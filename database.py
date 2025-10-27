@@ -65,6 +65,10 @@ class ReportTestRailUsers(Base):
     __table__ = Table('report_testrail_users', Base.metadata, autoload=True) # noqa
 
 
+class ReportTestRailTestHealth(Base):
+    __table__ = Table('report_testrail_test_health', Base.metadata, autoload=True) # noqa
+
+
 class ReportJiraSoftvisionWorklogs(Base):
     __table__ = Table('report_jira_softvision_worklogs', Base.metadata, autoload=True) # noqa
 
